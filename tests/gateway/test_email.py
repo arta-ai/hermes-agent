@@ -14,6 +14,8 @@ Covers:
 
 import os
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -31,6 +33,7 @@ class TestConfigEnvOverrides(unittest.TestCase):
         "EMAIL_PASSWORD": "secret",
         "EMAIL_IMAP_HOST": "imap.test.com",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
     }, clear=False)
     def test_email_config_loaded_from_env(self):
         from gateway.config import GatewayConfig, Platform, _apply_env_overrides
@@ -45,6 +48,7 @@ class TestConfigEnvOverrides(unittest.TestCase):
         "EMAIL_PASSWORD": "secret",
         "EMAIL_IMAP_HOST": "imap.test.com",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         "EMAIL_HOME_ADDRESS": "user@test.com",
     }, clear=False)
     def test_email_home_channel_loaded(self):
@@ -281,6 +285,7 @@ class TestDispatchMessage(unittest.TestCase):
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_IMAP_PORT": "993",
             "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
             "EMAIL_SMTP_PORT": "587",
             "EMAIL_POLL_INTERVAL": "15",
         }):
@@ -555,6 +560,7 @@ class TestThreadContext(unittest.TestCase):
             "EMAIL_PASSWORD": "secret",
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         }):
             from gateway.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
@@ -652,6 +658,7 @@ class TestSendMethods(unittest.TestCase):
             "EMAIL_PASSWORD": "secret",
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         }):
             from gateway.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
@@ -897,6 +904,7 @@ class TestConnectDisconnect(unittest.TestCase):
             "EMAIL_PASSWORD": "secret",
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         }):
             from gateway.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
@@ -975,6 +983,7 @@ class TestFetchNewMessages(unittest.TestCase):
             "EMAIL_PASSWORD": "secret",
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         }):
             from gateway.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
@@ -1068,6 +1077,7 @@ class TestPollLoop(unittest.TestCase):
             "EMAIL_PASSWORD": "secret",
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
             "EMAIL_POLL_INTERVAL": "1",
         }):
             from gateway.platforms.email import EmailAdapter
@@ -1115,6 +1125,7 @@ class TestSendEmailStandalone(unittest.TestCase):
         "EMAIL_ADDRESS": "hermes@test.com",
         "EMAIL_PASSWORD": "secret",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         "EMAIL_SMTP_PORT": "587",
     })
     def test_send_email_tool_success(self):
@@ -1145,6 +1156,7 @@ class TestSendEmailStandalone(unittest.TestCase):
         "EMAIL_ADDRESS": "hermes@test.com",
         "EMAIL_PASSWORD": "secret",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
     })
     def test_send_email_tool_failure(self):
         """SMTP failure should return error dict."""
@@ -1181,6 +1193,7 @@ class TestSmtpConnectionCleanup(unittest.TestCase):
         "EMAIL_PASSWORD": "secret",
         "EMAIL_IMAP_HOST": "imap.test.com",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         "EMAIL_SMTP_PORT": "587",
     }, clear=False)
     def _make_adapter(self):
@@ -1193,6 +1206,7 @@ class TestSmtpConnectionCleanup(unittest.TestCase):
         "EMAIL_PASSWORD": "secret",
         "EMAIL_IMAP_HOST": "imap.test.com",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         "EMAIL_SMTP_PORT": "587",
     }, clear=False)
     def test_smtp_quit_called_on_send_message_failure(self):
@@ -1212,6 +1226,7 @@ class TestSmtpConnectionCleanup(unittest.TestCase):
         "EMAIL_PASSWORD": "secret",
         "EMAIL_IMAP_HOST": "imap.test.com",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
         "EMAIL_SMTP_PORT": "587",
     }, clear=False)
     def test_smtp_close_called_when_quit_also_fails(self):
@@ -1237,6 +1252,7 @@ class TestImapConnectionCleanup(unittest.TestCase):
         "EMAIL_IMAP_HOST": "imap.test.com",
         "EMAIL_IMAP_PORT": "993",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
     }, clear=False)
     def _make_adapter(self):
         from gateway.config import PlatformConfig
@@ -1249,6 +1265,7 @@ class TestImapConnectionCleanup(unittest.TestCase):
         "EMAIL_IMAP_HOST": "imap.test.com",
         "EMAIL_IMAP_PORT": "993",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
     }, clear=False)
     def test_imap_logout_called_on_uid_fetch_failure(self):
         """IMAP logout() must be called even when uid fetch raises."""
@@ -1276,6 +1293,7 @@ class TestImapConnectionCleanup(unittest.TestCase):
         "EMAIL_IMAP_HOST": "imap.test.com",
         "EMAIL_IMAP_PORT": "993",
         "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTH_MODE": "password",
     }, clear=False)
     def test_imap_logout_called_on_early_return(self):
         """IMAP logout() must be called even when returning early (no unseen)."""
@@ -1304,6 +1322,7 @@ class TestImapIdExtensionForNetEase(unittest.TestCase):
             "EMAIL_PASSWORD": "secret",
             "EMAIL_IMAP_HOST": "imap.163.com",
             "EMAIL_SMTP_HOST": "smtp.163.com",
+            "EMAIL_AUTH_MODE": "password",
         }):
             from gateway.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))

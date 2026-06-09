@@ -520,6 +520,7 @@ class TestLaunchdServiceRecovery:
         calls = []
         domain = gateway_cli._launchd_domain()
         target = f"{domain}/{label}"
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: domain)
 
         def fake_run(cmd, check=False, **kwargs):
             if cmd and cmd[0] == "launchctl":
@@ -548,6 +549,7 @@ class TestLaunchdServiceRecovery:
         calls = []
         domain = gateway_cli._launchd_domain()
         target = f"{domain}/{label}"
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: domain)
 
         def fake_run(cmd, check=False, **kwargs):
             if cmd and cmd[0] == "launchctl":
@@ -622,6 +624,7 @@ class TestLaunchdServiceRecovery:
         label = gateway_cli.get_launchd_label()
         domain = gateway_cli._launchd_domain()
         target = f"{domain}/{label}"
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: domain)
 
         calls = []
 
@@ -641,6 +644,7 @@ class TestLaunchdServiceRecovery:
         label = gateway_cli.get_launchd_label()
         domain = gateway_cli._launchd_domain()
         target = f"{domain}/{label}"
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: domain)
 
         def fake_run(cmd, check=False, **kwargs):
             if "bootout" in cmd:
@@ -730,6 +734,7 @@ class TestLaunchdServiceRecovery:
         calls = []
         domain = gateway_cli._launchd_domain()
         target = f"{domain}/{label}"
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: domain)
 
         def fake_run(cmd, check=False, **kwargs):
             if cmd and cmd[0] == "launchctl":
@@ -756,7 +761,9 @@ class TestLaunchdServiceRecovery:
         plist_path = tmp_path / "ai.hermes.gateway.plist"
         plist_path.write_text(gateway_cli.generate_launchd_plist(), encoding="utf-8")
         label = gateway_cli.get_launchd_label()
-        target = f"{gateway_cli._launchd_domain()}/{label}"
+        domain = gateway_cli._launchd_domain()
+        target = f"{domain}/{label}"
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: domain)
 
         monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
         monkeypatch.setattr(gateway_cli, "refresh_launchd_plist_if_needed", lambda: False)
@@ -812,7 +819,9 @@ class TestLaunchdServiceRecovery:
 
     def test_launchd_restart_falls_back_to_detached_on_error_5(self, monkeypatch, capsys):
         """kickstart -k error 5 (domain unmanageable) should relaunch detached."""
-        target = f"{gateway_cli._launchd_domain()}/{gateway_cli.get_launchd_label()}"
+        domain = gateway_cli._launchd_domain()
+        target = f"{domain}/{gateway_cli.get_launchd_label()}"
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: domain)
 
         monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 5.0)
         monkeypatch.setattr(gateway_cli, "_request_gateway_self_restart", lambda pid: False)

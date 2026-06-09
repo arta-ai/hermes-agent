@@ -3045,11 +3045,25 @@ def get_launchd_label() -> str:
 
 
 def _launchd_domain() -> str:
-    # The `user/<uid>` domain (vs the older `gui/<uid>`) is reachable from
-    # non-Aqua/background sessions (SSH, headless, login items) and is the only
-    # one that supports service management on macOS 26+. `gui/<uid>` returns
-    # error 125 ("Domain does not support specified action") there. See #23387.
-    return f"user/{os.getuid()}"  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
+    # Prefer the domain that already owns this LaunchAgent.  Some macOS hosts
+    # expose user LaunchAgents under `gui/<uid>` even though the user domain is
+    # printable; using `user/<uid>` for service management on those machines
+    # makes start/restart fall back to an unmanaged detached process.
+    uid = os.getuid()  # windows-footgun: ok — POSIX launchd helper
+    label = get_launchd_label()
+    for domain in (f"gui/{uid}", f"user/{uid}"):
+        try:
+            result = subprocess.run(
+                ["launchctl", "print", f"{domain}/{label}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        if result.returncode == 0:
+            return domain
+    return f"user/{uid}"
 
 
 # On macOS, exit code 125 ("Domain does not support specified action") and
@@ -3158,31 +3172,41 @@ def _launchd_service_state(label: str | None = None) -> dict:
 
     On current macOS, ``launchctl list <label>`` can return an empty
     non-zero result even for a running LaunchAgent.  ``launchctl print
-    gui/<uid>/<label>`` is the source of truth used by launchd itself.
+    <domain>/<label>`` is the source of truth used by launchd itself.
+    Prefer the configured management domain, then fall back to the GUI domain
+    because user LaunchAgents can be reported there even when the CLI was
+    started from a non-Aqua session.
     """
     label = label or get_launchd_label()
-    target = f"{_launchd_domain()}/{label}"
     state = {
         "loaded": False,
         "running": False,
         "pid": None,
         "state": "unknown",
         "stdout": "",
+        "domain": _launchd_domain(),
     }
-    try:
-        result = subprocess.run(
-            ["launchctl", "print", target],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        return state
-    state["stdout"] = result.stdout
-    if result.returncode != 0:
+    domains = [_launchd_domain(), f"gui/{os.getuid()}"]
+    for target_domain in dict.fromkeys(domains):
+        target = f"{target_domain}/{label}"
+        try:
+            result = subprocess.run(
+                ["launchctl", "print", target],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        if result.returncode != 0:
+            continue
+        state["domain"] = target_domain
+        state["stdout"] = result.stdout
+        break
+    else:
         return state
     state["loaded"] = True
-    for raw_line in result.stdout.splitlines():
+    for raw_line in state["stdout"].splitlines():
         line = raw_line.strip()
         if line.startswith("state = ") and state["state"] == "unknown":
             state["state"] = line.split("=", 1)[1].strip()

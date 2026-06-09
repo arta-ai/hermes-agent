@@ -18,6 +18,18 @@ from gateway.restart import (
 )
 
 
+def _without_launchctl_probe_calls(calls):
+    """Drop launchctl print probes used for domain discovery from call assertions."""
+    return [
+        call for call in calls
+        if not (
+            isinstance(call, list)
+            and len(call) >= 2
+            and call[:2] == ["launchctl", "print"]
+        )
+    ]
+
+
 class TestUserSystemdPrivateSocketPreflight:
     def test_preflight_accepts_private_socket_without_dbus_bus(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "_ensure_user_systemd_env", lambda: None)
@@ -495,7 +507,7 @@ class TestLaunchdServiceRecovery:
         label = gateway_cli.get_launchd_label()
         domain = gateway_cli._launchd_domain()
         assert "--replace" in plist_path.read_text(encoding="utf-8")
-        assert calls[:2] == [
+        assert _without_launchctl_probe_calls(calls)[:2] == [
             ["launchctl", "bootout", f"{domain}/{label}"],
             ["launchctl", "bootstrap", domain, str(plist_path)],
         ]
@@ -521,7 +533,7 @@ class TestLaunchdServiceRecovery:
 
         gateway_cli.launchd_start()
 
-        assert calls == [
+        assert _without_launchctl_probe_calls(calls) == [
             ["launchctl", "kickstart", target],
             ["launchctl", "bootstrap", domain, str(plist_path)],
             ["launchctl", "kickstart", target],
@@ -549,7 +561,7 @@ class TestLaunchdServiceRecovery:
 
         gateway_cli.launchd_start()
 
-        assert calls == [
+        assert _without_launchctl_probe_calls(calls) == [
             ["launchctl", "kickstart", target],
             ["launchctl", "bootstrap", domain, str(plist_path)],
             ["launchctl", "kickstart", target],
@@ -576,7 +588,7 @@ class TestLaunchdServiceRecovery:
 
         gateway_cli.launchd_restart()
 
-        assert calls == [
+        assert _without_launchctl_probe_calls(calls) == [
             ("term", 321, False),
             ["launchctl", "kickstart", "-k", target],
         ]
@@ -593,6 +605,7 @@ class TestLaunchdServiceRecovery:
             "_request_gateway_self_restart",
             lambda pid: calls.append(("self", pid)) or True,
         )
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: f"user/{os.getuid()}")
         monkeypatch.setattr(
             gateway_cli.subprocess,
             "run",
@@ -621,7 +634,7 @@ class TestLaunchdServiceRecovery:
 
         gateway_cli.launchd_stop()
 
-        assert calls == [["launchctl", "bootout", target]]
+        assert _without_launchctl_probe_calls(calls) == [["launchctl", "bootout", target]]
 
     def test_launchd_stop_tolerates_already_unloaded(self, monkeypatch, capsys):
         """launchd_stop silently handles exit codes 3/113 (job not loaded)."""
@@ -679,9 +692,25 @@ class TestLaunchdServiceRecovery:
         assert "stale" in output.lower()
         assert "not loaded" in output.lower()
 
-    def test_launchd_domain_uses_user_domain(self):
-        # The user/<uid> domain (not gui/<uid>) is the one reachable from
-        # non-Aqua/background sessions on macOS 26+ (issue #23387).
+    def test_launchd_domain_prefers_loaded_gui_domain(self, monkeypatch):
+        label = gateway_cli.get_launchd_label()
+
+        def fake_run(cmd, **kwargs):
+            if cmd == ["launchctl", "print", f"gui/{os.getuid()}/{label}"]:
+                return SimpleNamespace(returncode=0, stdout="loaded", stderr="")
+            return SimpleNamespace(returncode=113, stdout="", stderr="not loaded")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        assert gateway_cli._launchd_domain() == f"gui/{os.getuid()}"
+
+    def test_launchd_domain_falls_back_to_user_domain_when_unloaded(self, monkeypatch):
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=113, stdout="", stderr="not loaded"),
+        )
+
         assert gateway_cli._launchd_domain() == f"user/{os.getuid()}"
 
     def test_launchctl_domain_unsupported_recognizes_macos26_codes(self):
@@ -716,7 +745,7 @@ class TestLaunchdServiceRecovery:
 
         gateway_cli.launchd_start()
 
-        assert calls == [
+        assert _without_launchctl_probe_calls(calls) == [
             ["launchctl", "kickstart", target],
             ["launchctl", "bootstrap", domain, str(plist_path)],
             ["launchctl", "kickstart", target],

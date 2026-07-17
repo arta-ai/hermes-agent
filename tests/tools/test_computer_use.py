@@ -1545,6 +1545,51 @@ class TestCuaDriverSessionReconnect:
         assert bridge.calls[1][0] == ("call", "list_apps", {})
         assert len(bridge.calls) == 2
 
+    def test_call_tool_reclaims_expired_declared_session_once(self):
+        """A logical `session ... has ended` error gets one re-declaration.
+
+        The daemon can forget session ownership without closing the stdio MCP
+        channel, so the normal ClosedResourceError reconnect path never runs.
+        """
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+                self.effects = [
+                    {
+                        "data": "session 'hermes-test' has ended; tool call was rejected",
+                        "images": [],
+                        "structuredContent": None,
+                        "isError": True,
+                    },
+                    {
+                        "data": "session re-declared",
+                        "images": [],
+                        "structuredContent": None,
+                        "isError": False,
+                    },
+                    {
+                        "data": "ok",
+                        "images": [],
+                        "structuredContent": {"windows": []},
+                        "isError": False,
+                    },
+                ]
+
+            def run(self, value, timeout=None):
+                self.calls.append((value, timeout))
+                return self.effects.pop(0)
+
+        bridge = FakeBridge()
+        session = self._make_session(bridge)
+
+        result = session.call_tool("list_windows", {"session": "hermes-test"})
+
+        assert result["isError"] is False
+        assert [call[0][1] for call in bridge.calls] == [
+            "list_windows", "start_session", "list_windows",
+        ]
+        assert bridge.calls[1][0][2] == {"session": "hermes-test"}
+
     def test_call_tool_does_not_retry_on_unrelated_error(self):
         """Non-transport errors must propagate without a reconnect attempt."""
         class FakeBridge:

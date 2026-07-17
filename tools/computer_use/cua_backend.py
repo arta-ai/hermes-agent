@@ -840,6 +840,32 @@ class _CuaDriverSession:
         )
 
     @staticmethod
+    def _is_expired_declared_session_result(
+        result: Dict[str, Any], session_id: Any
+    ) -> bool:
+        """Return True when cua-driver rejects a once-valid declared session.
+
+        A daemon/proxy restart can preserve the stdio MCP connection while
+        dropping its per-session registry. In that case the driver returns a
+        logical MCP tool error (rather than closing the transport), so the
+        closed-resource reconnect path cannot recover it. Only match the
+        driver's explicit expired-session wording and the exact requested
+        session value; arbitrary tool errors must continue to surface as-is.
+        """
+        if not isinstance(session_id, str) or not session_id or not result.get("isError"):
+            return False
+        data = result.get("data")
+        if isinstance(data, str):
+            message = data
+        else:
+            try:
+                message = json.dumps(data, sort_keys=True)
+            except (TypeError, ValueError):
+                message = str(data)
+        lowered = message.lower()
+        return session_id in message and "session" in lowered and "has ended" in lowered
+
+    @staticmethod
     def _is_transient_daemon_error(exc: Exception) -> bool:
         """Return True for the cua-driver daemon-proxy EAGAIN congestion error.
 
@@ -1007,23 +1033,58 @@ class _CuaDriverSession:
         # transport (which has its own retry + screenshot-to-file mitigation)
         # rather than burning a long backoff chain on a path that won't recover.
         try:
-            return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+            out = self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
         except Exception as e:
             if self._is_transient_daemon_error(e):
                 logger.warning(
                     "cua-driver MCP transport failed on %s (%s); "
                     "falling back to CLI transport", name, e,
                 )
-                return self._call_tool_via_cli(name, args, timeout)
-            if not self._is_closed_session_error(e):
-                raise
-            # Daemon restart closes the cached stdio channel. Reconnect once and
-            # retry exactly one more time — never loop, to avoid hammering a
-            # genuinely dead daemon.
-            logger.warning("cua-driver MCP session closed during %s; reconnecting once", name)
-            with self._lock:
-                self._restart_session_locked()
-            return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+                out = self._call_tool_via_cli(name, args, timeout)
+            else:
+                if not self._is_closed_session_error(e):
+                    raise
+                # Daemon restart closes the cached stdio channel. Reconnect once and
+                # retry exactly one more time — never loop, to avoid hammering a
+                # genuinely dead daemon.
+                logger.warning("cua-driver MCP session closed during %s; reconnecting once", name)
+                with self._lock:
+                    self._restart_session_locked()
+                out = self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+
+        # A daemon/proxy can drop a declared session while the stdio transport
+        # itself stays healthy. That is a logical tool error, not a closed
+        # resource, so reconnect-on-transport alone cannot recover it. Reclaim
+        # only the exact declared session once, then retry the interrupted
+        # operation once. Do not apply this to lifecycle calls themselves.
+        session_id = args.get("session")
+        if (
+            name not in {"start_session", "end_session"}
+            and self._is_expired_declared_session_result(out, session_id)
+        ):
+            logger.warning(
+                "cua-driver declared session expired during %s; re-declaring once", name
+            )
+            try:
+                with self._lock:
+                    declared = self._bridge.run(
+                        self._call_tool_async("start_session", {"session": session_id}),
+                        timeout=timeout,
+                    )
+                    if declared.get("isError") is True:
+                        logger.warning(
+                            "cua-driver refused session re-declaration during %s; preserving original error",
+                            name,
+                        )
+                        return out
+                    return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+            except Exception as exc:
+                logger.warning(
+                    "cua-driver session re-declaration during %s failed; preserving original error: %s",
+                    name,
+                    exc,
+                )
+        return out
 
 
 def _extract_tool_result(mcp_result: Any) -> Dict[str, Any]:

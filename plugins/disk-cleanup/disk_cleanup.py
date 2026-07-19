@@ -81,6 +81,28 @@ def is_safe_path(path: Path) -> bool:
     return False
 
 
+def is_source_controlled_path(path: Path) -> bool:
+    """Return whether *path* sits inside a Git checkout or linked worktree.
+
+    Test-looking names in a source checkout are product tests, not disposable
+    tool artifacts.  A normal checkout has a ``.git`` directory; a linked
+    worktree has a ``.git`` file.  Either marker is sufficient and no Git
+    subprocess is needed.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    parent = resolved if resolved.is_dir() else resolved.parent
+    for candidate in (parent, *parent.parents):
+        marker = candidate / ".git"
+        if marker.exists():
+            return True
+        if candidate == get_hermes_home():
+            break
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
@@ -269,7 +291,11 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
         cat = item["category"]
         size = item["size"]
 
-        # Re-validate stale "cron-output" entries (fixes #37721).
+        if cat == "test" and is_source_controlled_path(p):
+            # A stale entry may predate the Git-worktree guard.  Drop it
+            # without deletion; source-controlled tests are durable code.
+            continue
+
         if cat == "cron-output":
             re_cat = guess_category(p)
             if re_cat != "cron-output":
@@ -319,6 +345,12 @@ def quick() -> Dict[str, Any]:
             continue
 
         age = (now - datetime.fromisoformat(item["timestamp"])).days
+
+        # Source-controlled tests are durable code, including linked Git
+        # worktrees where .git is a file. Drop only the stale tracking entry.
+        if cat == "test" and is_source_controlled_path(p):
+            _log(f"SKIP source-controlled test path: {p}")
+            continue
 
         # ---- stale-state migration (fixes #37721) ----
         # Old tracked.json entries may carry a "cron-output" category for
@@ -552,6 +584,8 @@ def guess_category(path: Path) -> Optional[str]:
     Used by the ``post_tool_call`` hook to auto-track ephemeral files.
     """
     if not is_safe_path(path):
+        return None
+    if is_source_controlled_path(path):
         return None
 
     # Skip the state dir itself, logs, memory files, sessions, config.

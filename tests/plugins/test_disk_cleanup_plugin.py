@@ -176,6 +176,40 @@ class TestGuessCategory:
         p.write_text("x")
         assert dg.guess_category(p) is None
 
+    def test_source_controlled_test_is_not_auto_tracked(self, _isolate_env):
+        """Regression: linked-worktree product tests must not be ephemeral."""
+        dg = _load_lib()
+        worktree = _isolate_env / "worktrees" / "candidate"
+        worktree.mkdir(parents=True)
+        # A linked Git worktree has a .git file, unlike a normal checkout.
+        (worktree / ".git").write_text("gitdir: /example/common-dir/worktrees/candidate\n")
+        p = worktree / "tests" / "test_regression.py"
+        p.parent.mkdir()
+        p.write_text("x")
+        assert dg.is_source_controlled_path(p) is True
+        assert dg.guess_category(p) is None
+
+
+class TestSourceControlledStaleEntries:
+    def test_quick_preserves_and_untracks_source_controlled_test(self, _isolate_env):
+        dg = _load_lib()
+        worktree = _isolate_env / "worktrees" / "candidate"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text("gitdir: /example/common-dir/worktrees/candidate\n")
+        p = worktree / "tests" / "test_regression.py"
+        p.parent.mkdir()
+        p.write_text("x")
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": str(p), "category": "test",
+            "timestamp": "2025-01-01T00:00:00+00:00", "size": 1,
+        }]))
+        summary = dg.quick()
+        assert summary["deleted"] == 0
+        assert p.exists()
+        assert json.loads(tracked_file.read_text()) == []
+
 
 class TestStaleCronEntryMigration:
     """Regression tests for #37721 — stale cron-output entries in tracked.json."""

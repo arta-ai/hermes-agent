@@ -1532,6 +1532,98 @@ class HonchoSessionManager:
                 logger.debug("Honcho peer search fallback also failed: %s", e2)
                 return ""
 
+        messages = list(messages or [])
+
+        # Some Honcho backends can return semantically adjacent but lexically
+        # unrelated rows for ``peer_perspective`` searches, even when an exact
+        # raw message exists in the workspace index.  If the scoped result set
+        # contains no lexical hit, run one workspace search, retain only strong
+        # lexical matches, and verify every non-target-authored candidate belongs
+        # to a session that actually contains the target peer.  This restores
+        # exact-marker lookup without leaking another peer's workspace messages.
+        query_terms = {
+            term for term in re.findall(r"[\w-]+", q.casefold()) if len(term) >= 3
+        }
+
+        def lexical_hit(message: Any) -> bool:
+            content = (getattr(message, "content", "") or "").casefold()
+            if not content:
+                return False
+            if q.casefold() in content:
+                return True
+            if not query_terms:
+                return False
+            content_terms = set(re.findall(r"[\w-]+", content))
+            matched = len(query_terms & content_terms)
+            required = 1 if len(query_terms) == 1 else max(2, (len(query_terms) * 3 + 4) // 5)
+            return matched >= required
+
+        if not any(lexical_hit(message) for message in messages):
+            try:
+                workspace_candidates = self._authed_call(
+                    "workspace exact-message search",
+                    lambda: self.honcho.search(q, limit=min(100, limit * 2)),
+                )
+            except HonchoAuthError:
+                raise
+            except Exception as e:
+                logger.debug("Honcho workspace exact-message fallback failed: %s", e)
+                workspace_candidates = []
+
+            scoped_exact: list[Any] = []
+            session_scope_cache: dict[str, bool] = {}
+            for candidate in workspace_candidates or []:
+                if not lexical_hit(candidate):
+                    continue
+                author = getattr(candidate, "peer_id", "") or ""
+                candidate_session_id = getattr(candidate, "session_id", "") or ""
+                if author == peer_id:
+                    scoped_exact.append(candidate)
+                    continue
+                if not candidate_session_id:
+                    continue
+                allowed = session_scope_cache.get(candidate_session_id)
+                if allowed is None:
+                    try:
+                        peers = self._authed_call(
+                            "exact-message session scope",
+                            lambda sid=candidate_session_id: self._sdk_session(sid).peers(),
+                        )
+                        allowed = any(
+                            (getattr(p, "id", None) or getattr(p, "peer_id", None)) == peer_id
+                            for p in peers or []
+                        )
+                    except HonchoAuthError:
+                        raise
+                    except Exception as e:
+                        logger.debug(
+                            "Could not verify exact-message session scope for %s: %s",
+                            candidate_session_id,
+                            e,
+                        )
+                        allowed = False
+                    session_scope_cache[candidate_session_id] = allowed
+                if allowed:
+                    scoped_exact.append(candidate)
+
+            if scoped_exact:
+                seen: set[str] = set()
+                merged: list[Any] = []
+                for message in [*scoped_exact, *messages]:
+                    message_id = str(getattr(message, "id", "") or "")
+                    dedupe_key = message_id or "\x1f".join(
+                        [
+                            str(getattr(message, "session_id", "") or ""),
+                            str(getattr(message, "peer_id", "") or ""),
+                            str(getattr(message, "content", "") or ""),
+                        ]
+                    )
+                    if dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    merged.append(message)
+                messages = merged
+
         if not messages:
             return ""
 

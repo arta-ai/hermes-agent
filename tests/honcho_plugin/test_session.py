@@ -181,6 +181,68 @@ class TestPeerLookupHelpers:
         # user-stated facts from assistant-derived ones.
         assert "[assistant" in result
 
+    def test_search_context_recovers_exact_workspace_hit_with_peer_scope(self):
+        """An irrelevant perspective result must not hide a scoped exact raw hit."""
+        mgr, session = self._make_cached_manager()
+        honcho_client = MagicMock()
+        honcho_client.search.side_effect = [
+            [
+                SimpleNamespace(
+                    content="unrelated historical deployment material",
+                    peer_id="hermes",
+                    session_id="s-old",
+                    id="m-old",
+                )
+            ],
+            [
+                SimpleNamespace(
+                    content="EXACT-MARKER-ALPHA belongs to Robert",
+                    peer_id="hermes",
+                    session_id="s-robert",
+                    id="m-hit",
+                ),
+                SimpleNamespace(
+                    content="EXACT-MARKER-ALPHA belongs to Alice and must stay private",
+                    peer_id="other-assistant",
+                    session_id="s-alice",
+                    id="m-other",
+                ),
+            ],
+        ]
+
+        def sdk_session(session_id):
+            sdk = MagicMock()
+            peers = [SimpleNamespace(id="robert")] if session_id == "s-robert" else [SimpleNamespace(id="alice")]
+            sdk.peers.return_value = peers
+            return sdk
+
+        mgr._sdk_session = MagicMock(side_effect=sdk_session)
+        with patch.object(HonchoSessionManager, "honcho", new_callable=lambda: property(lambda s: honcho_client)):
+            result = mgr.search_context(session.key, "EXACT-MARKER-ALPHA")
+
+        assert "belongs to Robert" in result
+        assert "belongs to Alice" not in result
+        assert result.index("EXACT-MARKER-ALPHA") < result.index("unrelated historical")
+        assert honcho_client.search.call_count == 2
+        assert honcho_client.search.call_args_list[1].kwargs.get("filters") is None
+        assert {call.args[0] for call in mgr._sdk_session.mock_calls} == {"s-robert", "s-alice"}
+
+    def test_search_context_accepts_target_authored_exact_hit_without_session_lookup(self):
+        """A target-authored workspace hit is intrinsically in target scope."""
+        mgr, session = self._make_cached_manager()
+        honcho_client = MagicMock()
+        honcho_client.search.side_effect = [
+            [SimpleNamespace(content="semantic miss", peer_id="hermes", session_id="s-old", id="m-old")],
+            [SimpleNamespace(content="TARGET-RAW-MARKER", peer_id="robert", session_id="s-new", id="m-new")],
+        ]
+        mgr._sdk_session = MagicMock()
+
+        with patch.object(HonchoSessionManager, "honcho", new_callable=lambda: property(lambda s: honcho_client)):
+            result = mgr.search_context(session.key, "TARGET-RAW-MARKER")
+
+        assert "TARGET-RAW-MARKER" in result
+        mgr._sdk_session.assert_not_called()
+
 
     def test_create_conclusion_defaults_to_user_target(self):
         mgr, session = self._make_cached_manager()

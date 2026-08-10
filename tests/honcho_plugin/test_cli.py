@@ -744,3 +744,28 @@ class TestCmdSetupDeviceFlow:
         assert len(calls) == 1
         assert "apiKey" not in cfg.get("hosts", {}).get("hermes", {})
 
+
+class TestAllProfileHostConfigs:
+    def test_reads_canonical_underscore_profile_host_keys(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [SimpleNamespace(name="default"), SimpleNamespace(name="builder")],
+        )
+        monkeypatch.setattr(
+            honcho_cli,
+            "_read_config",
+            lambda: {
+                "hosts": {
+                    "hermes": {"peerName": "Arta", "aiPeer": "hermes"},
+                    "hermes_builder": {"peerName": "Arta", "aiPeer": "builder"},
+                }
+            },
+        )
+
+        assert honcho_cli._all_profile_host_configs() == [
+            ("default", "hermes", {"peerName": "Arta", "aiPeer": "hermes"}),
+            ("builder", "hermes_builder", {"peerName": "Arta", "aiPeer": "builder"}),
+        ]
+

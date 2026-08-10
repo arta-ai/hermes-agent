@@ -1110,8 +1110,8 @@ def _all_profile_host_configs() -> list[tuple[str, str, dict]]:
     for p in profiles:
         if p.name == "default":
             continue
-        h = f"{HOST}.{p.name}"
-        results.append((p.name, h, hosts.get(h, {})))
+        h = profile_host_key(p.name)
+        results.append((p.name, h, _host_block(cfg, h)))
 
     return results
 

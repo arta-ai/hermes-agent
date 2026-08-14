@@ -5420,6 +5420,34 @@ def _apply_toolset_change(config: dict, platform: str, toolset_names: List[str],
     _save_platform_tools(config, platform, updated)
 
 
+def _apply_mcp_server_platform_change(
+    config: dict, platform: str, server_names: List[str], action: str
+):
+    """Add or remove configured MCP servers from one platform's exposure list."""
+    enabled = _get_platform_tools(config, platform, include_default_mcp_servers=False)
+    platform_toolsets = config.setdefault("platform_toolsets", {})
+    existing = platform_toolsets.get(platform, [])
+    if not isinstance(existing, list):
+        existing = []
+
+    if action == "disable":
+        enabled -= set(server_names)
+        # _save_platform_tools deliberately preserves existing non-configurable
+        # entries. Remove only the explicitly disabled MCP servers first so the
+        # preservation step cannot silently add them back.
+        platform_toolsets[platform] = [
+            entry for entry in existing if str(entry) not in set(server_names)
+        ]
+    else:
+        enabled |= set(server_names)
+        # An explicit enable supersedes the platform-wide MCP opt-out sentinel.
+        platform_toolsets[platform] = [
+            entry for entry in existing if str(entry) != "no_mcp"
+        ]
+
+    _save_platform_tools(config, platform, enabled)
+
+
 def _apply_mcp_change(config: dict, targets: List[str], action: str) -> Set[str]:
     """Add or remove specific MCP tools from a server's exclude list.
 
@@ -5476,21 +5504,32 @@ def _print_tools_list(enabled_toolsets: set, mcp_servers: dict, platform: str = 
         print()
         print("MCP servers:")
         for srv_name, srv_cfg in mcp_servers.items():
+            status = (color("✓ enabled", Colors.GREEN) if srv_name in enabled_toolsets
+                      else color("✗ disabled", Colors.RED))
             tools_cfg = srv_cfg.get("tools") or {}
             exclude = tools_cfg.get("exclude") or []
             include = tools_cfg.get("include") or []
             if include:
-                _print_info(f"{srv_name}  [include only: {', '.join(include)}]")
+                _print_info(
+                    f"{status}  {srv_name}  [include only: {', '.join(include)}]"
+                )
             elif exclude:
-                _print_info(f"{srv_name}  [excluded: {color(', '.join(exclude), Colors.YELLOW)}]")
+                _print_info(
+                    f"{status}  {srv_name}  "
+                    f"[excluded: {color(', '.join(exclude), Colors.YELLOW)}]"
+                )
             else:
-                _print_info(f"{srv_name}  {color('all tools enabled', Colors.DIM)}")
+                _print_info(
+                    f"{status}  {srv_name}  {color('all tools enabled', Colors.DIM)}"
+                )
 
 
 def tools_disable_enable_command(args):
     """Enable, disable, or list tools for a platform.
 
-    Built-in toolsets use plain names (e.g. ``web``, ``memory``).
+    Built-in toolsets and configured MCP servers use plain names (e.g.
+    ``web``, ``memory``, ``github``). A plain MCP server name controls whether
+    that server is exposed on the selected platform.
     MCP tools use ``server:tool`` notation (e.g. ``github:create_issue``).
     """
     action = args.tools_action
@@ -5507,15 +5546,25 @@ def tools_disable_enable_command(args):
         return
 
     targets: List[str] = args.names
-    toolset_targets = [t for t in targets if ":" not in t]
+    plain_targets = [t for t in targets if ":" not in t]
     mcp_targets = [t for t in targets if ":" in t]
 
     valid_toolsets = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS} | _get_plugin_toolset_keys()
-    unknown_toolsets = [t for t in toolset_targets if t not in valid_toolsets]
+    configured_mcp_servers = set((config.get("mcp_servers") or {}).keys())
+    # Preserve the historic built-in/plugin precedence for the unlikely case
+    # where a configured MCP server collides with a native toolset name.
+    toolset_targets = [t for t in plain_targets if t in valid_toolsets]
+    mcp_server_targets = [
+        t for t in plain_targets
+        if t in configured_mcp_servers and t not in valid_toolsets
+    ]
+    unknown_toolsets = [
+        t for t in plain_targets
+        if t not in valid_toolsets and t not in configured_mcp_servers
+    ]
     if unknown_toolsets:
         for name in unknown_toolsets:
             _print_error(f"Unknown toolset '{name}'")
-        toolset_targets = [t for t in toolset_targets if t in valid_toolsets]
 
     # Reject platform-scoped toolsets on platforms that don't allow them.
     restricted_targets = [
@@ -5533,6 +5582,10 @@ def tools_disable_enable_command(args):
 
     if toolset_targets:
         _apply_toolset_change(config, platform, toolset_targets, action)
+    if mcp_server_targets:
+        _apply_mcp_server_platform_change(
+            config, platform, mcp_server_targets, action
+        )
 
     failed_servers: Set[str] = set()
     if mcp_targets:

@@ -5,24 +5,32 @@ Allows users to interact with Hermes by sending emails.
 Uses IMAP to receive and SMTP to send messages.
 
 Environment variables:
+    EMAIL_AUTH_MODE     — password/app_password (default) or gog
     EMAIL_IMAP_HOST     — IMAP server host (e.g., imap.gmail.com)
     EMAIL_IMAP_PORT     — IMAP server port (default: 993)
     EMAIL_SMTP_HOST     — SMTP server host (e.g., smtp.gmail.com)
     EMAIL_SMTP_PORT     — SMTP server port (default: 587)
     EMAIL_ADDRESS       — Email address for the agent
     EMAIL_PASSWORD      — Email password or app-specific password
+    EMAIL_GOG_ACCOUNT   — gog OAuth account when EMAIL_AUTH_MODE=gog
     EMAIL_POLL_INTERVAL — Seconds between mailbox checks (default: 15)
     EMAIL_ALLOWED_USERS — Comma-separated list of allowed sender addresses
 """
 
 import asyncio
+import base64
+import binascii
 import email as email_lib
 import imaplib
+import json
 import logging
 import os
 import re
+import shutil
 import smtplib
 import socket
+import subprocess
+import tempfile
 
 # Profile-scoped secret reader for multiplexing support (PR #50094)
 from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
@@ -204,12 +212,18 @@ def _is_automated_sender(address: str, headers: dict) -> bool:
     return False
     
 def check_email_requirements() -> bool:
-    """Check if email platform settings are available and non-blank.
+    """Check if one complete email authentication mode is configured.
 
-    Treats blank/whitespace-only values as missing so an abandoned setup that
-    left empty ``EMAIL_*`` keys in ``.env`` does not enable the platform (#40715).
+    ``gog`` mode reuses an OAuth grant held by the external gog CLI and does
+    not require IMAP/SMTP hosts or an app password. Password mode retains the
+    original four-variable requirement. Blank values never enable either mode.
     """
+    auth_mode = (_get_secret("EMAIL_AUTH_MODE", "") or "password").strip().lower()
     addr = _get_secret("EMAIL_ADDRESS", "").strip()
+    if auth_mode == "gog":
+        account = (_get_secret("EMAIL_GOG_ACCOUNT", "") or addr).strip()
+        return bool(account and shutil.which("gog"))
+
     pwd = _get_secret("EMAIL_PASSWORD", "").strip()
     imap = _get_secret("EMAIL_IMAP_HOST", "").strip()
     smtp = _get_secret("EMAIL_SMTP_HOST", "").strip()
@@ -528,7 +542,22 @@ class EmailAdapter(BasePlatformAdapter):
         # misleading ``[Errno 8] nodename nor servname`` (an unresolvable name)
         # instead of an obvious "host not set" error.
         extra = config.extra or {}
-        self._address = (_get_secret("EMAIL_ADDRESS", "") or extra.get("address", "")).strip()
+        self._auth_mode = (
+            _get_secret("EMAIL_AUTH_MODE", "")
+            or extra.get("auth_mode", "")
+            or "password"
+        ).strip().lower()
+        self._gog_account = (
+            _get_secret("EMAIL_GOG_ACCOUNT", "")
+            or extra.get("gog_account", "")
+        ).strip()
+        self._address = (
+            _get_secret("EMAIL_ADDRESS", "")
+            or extra.get("address", "")
+            or self._gog_account
+        ).strip()
+        if not self._gog_account:
+            self._gog_account = self._address
         self._password = _get_secret("EMAIL_PASSWORD", "")
         self._imap_host = (_get_secret("EMAIL_IMAP_HOST", "") or extra.get("imap_host", "")).strip()
         self._imap_port = _esecret_int("EMAIL_IMAP_PORT", 993)

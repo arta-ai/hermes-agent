@@ -1,0 +1,11 @@
+name: worktree-reconciliation
+version: "1.0.0"
+description: Session-owned Git worktree leases and exact-path local WIP checkpoint enforcement.
+author: LOAW
+kind: standalone
+provides_hooks:
+  - pre_tool_call
+  - pre_llm_call
+  - pre_verify
+  - on_session_end
+  - subagent_stop

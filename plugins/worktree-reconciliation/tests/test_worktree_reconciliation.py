@@ -98,6 +98,78 @@ class EngineTests(Fixture):
         self.assertEqual(receipt["secret_scan"]["status"], "pass")
         self.assertEqual(receipt["diff_check"], "pass")
         self.assertEqual(receipt["remaining_dirty_paths"], [])
+        self.assertEqual(receipt["committed_manifest"], receipt["staged_manifest"])
+        self.assertEqual(receipt["checkpoint_ref"], result["checkpoint_ref"])
+        git(wt, "show-ref", "--verify", result["checkpoint_ref"])
+
+    def test_second_active_lease_for_same_worktree_is_rejected(self) -> None:
+        wt = self.worktree("exclusive")
+        first = engine.open_lease(
+            repo=str(wt), session_id="session-exclusive", run_id="run-exclusive-1",
+            owned_paths=["src"], state_root=self.state,
+        )
+        self.assertTrue(first["ok"])
+
+        second = engine.open_lease(
+            repo=str(wt), session_id="session-exclusive", run_id="run-exclusive-2",
+            owned_paths=["docs"], state_root=self.state,
+        )
+
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["state"], "OPEN_REJECTED")
+        self.assertTrue(any("one active lease per worktree" in item for item in second["violations"]))
+
+    def test_automatic_checkpoint_refuses_tracked_deletion(self) -> None:
+        wt = self.worktree("deletion")
+        engine.open_lease(
+            repo=str(wt), session_id="session-deletion", run_id="run-deletion",
+            owned_paths=["src"], state_root=self.state,
+        )
+        (wt / "src" / "app.py").unlink()
+
+        result = engine.checkpoint_lease(
+            session_id="session-deletion", run_id="run-deletion", reason="session_end",
+            finalize=True, state_root=self.state,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "BLOCKED_DIRTY")
+        self.assertTrue(any("refuses deletions" in item for item in result["violations"]))
+        self.assertEqual(git(wt, "rev-parse", "HEAD").stdout.strip(), self.base_head)
+        self.assertIn(" D src/app.py", git(wt, "status", "--porcelain").stdout)
+
+    def test_legacy_multiple_active_leases_block_checkpoint(self) -> None:
+        wt = self.worktree("legacy-multiple")
+        engine.open_lease(
+            repo=str(wt), session_id="session-legacy-1", run_id="run-legacy-1",
+            owned_paths=["src"], state_root=self.state,
+        )
+        _, first_lease = engine.load_lease(
+            "session-legacy-1", "run-legacy-1", state_root=self.state,
+        )
+        legacy = dict(first_lease)
+        legacy.update({
+            "session_id": "session-legacy-1",
+            "run_id": "run-legacy-2",
+            "lease_id": "legacy-duplicate-fixture",
+        })
+        legacy_path = engine._lease_path(self.state, "session-legacy-1", "run-legacy-2")
+        engine._atomic_json(legacy_path, legacy, immutable=True)
+        write(wt / "src" / "app.py", "VALUE = 7\n")
+
+        results = engine.checkpoint_session(
+            "session-legacy-1", reason="session_end", finalize=True,
+            state_root=self.state,
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(not result["ok"] for result in results))
+        self.assertTrue(all(result["state"] == "BLOCKED_DIRTY" for result in results))
+        self.assertTrue(all(
+            any("multiple active leases" in item for item in result["violations"])
+            for result in results
+        ))
+        self.assertEqual(git(wt, "rev-parse", "HEAD").stdout.strip(), self.base_head)
 
     def test_gitleaks_blocks_secret_and_never_commits_it(self) -> None:
         wt = self.worktree("secret")

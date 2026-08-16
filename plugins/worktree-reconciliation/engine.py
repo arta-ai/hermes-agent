@@ -34,7 +34,8 @@ DEFAULT_STATE_ROOT = PROFILE_HOME / "worktree-reconciliation"
 LEASE_SCHEMA = "loaw.worktree_reconciliation_lease.v1"
 EXTENSION_SCHEMA = "loaw.worktree_scope_extension.v1"
 CHECKPOINT_SCHEMA = "loaw.worktree_checkpoint.v1"
-AUTHORITY_POLICY = "standing_local_wip_checkpoint_authority_2026-08-13"
+SUPERSEDE_SCHEMA = "loaw.worktree_lease_supersession.v1"
+AUTHORITY_POLICY = "standing_local_wip_checkpoint_authority_2026-08-16"
 LEASE_HOURS = 4
 MAX_AUTOMATIC_FILE_BYTES = 10 * 1024 * 1024
 
@@ -205,6 +206,66 @@ def _lease_lock(path: Path):
         os.close(fd)
 
 
+def _worktree_lock_path(state_root: Path, repo: Path) -> Path:
+    identity = hashlib.sha256(str(repo.resolve()).encode("utf-8")).hexdigest()
+    return state_root / "worktree-locks" / f"{identity}.state"
+
+
+def _worktree_leases(
+    state_root: Path,
+    repo: Path,
+    *,
+    states: set[str],
+) -> list[dict[str, Any]]:
+    target = repo.resolve()
+    matches: list[dict[str, Any]] = []
+    for lease in list_leases(states=states, state_root=state_root):
+        try:
+            if Path(str(lease.get("worktree"))).resolve() == target:
+                matches.append(lease)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return matches
+
+
+def _active_worktree_leases(state_root: Path, repo: Path) -> list[dict[str, Any]]:
+    return _worktree_leases(state_root, repo, states={"ACTIVE"})
+
+
+def _checkpoint_blocking_worktree_leases(state_root: Path, repo: Path) -> list[dict[str, Any]]:
+    return _worktree_leases(state_root, repo, states={"ACTIVE", "BLOCKED_DIRTY"})
+
+
+def _name_status_manifest(raw: bytes) -> list[dict[str, str]]:
+    tokens = [part.decode("utf-8", "surrogateescape") for part in raw.split(b"\0") if part]
+    if len(tokens) % 2:
+        raise ReconciliationError("unexpected git name-status manifest")
+    return [
+        {"status": tokens[index], "path": tokens[index + 1]}
+        for index in range(0, len(tokens), 2)
+    ]
+
+
+def _staged_manifest(repo: Path) -> list[dict[str, str]]:
+    raw = _run_git(repo, "diff", "--cached", "--name-status", "--no-renames", "-z").stdout
+    return _name_status_manifest(raw)
+
+
+def _commit_manifest(repo: Path, revision: str) -> list[dict[str, str]]:
+    raw = _run_git(
+        repo, "diff-tree", "--no-commit-id", "--name-status", "--no-renames", "-z", "-r", revision,
+    ).stdout
+    return _name_status_manifest(raw)
+
+
+def _automatic_deletion_paths(snapshot: dict[str, Any]) -> list[str]:
+    return sorted({
+        str(row["path"])
+        for row in snapshot.get("rows") or []
+        if "D" in {row.get("index_status"), row.get("worktree_status")}
+    })
+
+
 def open_lease(
     *,
     repo: str,
@@ -212,62 +273,104 @@ def open_lease(
     run_id: str,
     owned_paths: Iterable[str],
     owner: str | None = None,
+    adoption_manifest: str | Path | None = None,
     state_root: str | Path | None = None,
 ) -> dict[str, Any]:
     gate = _gate()
     root = _state_root(state_root)
+    repo_root = gate.repo_root(repo)
     lease_path = _lease_path(root, session_id, run_id)
     run_dir = _run_dir(root, session_id, run_id)
     open_receipt = run_dir / "open.json"
     if lease_path.exists() or open_receipt.exists():
         raise ReconciliationError("run_id is immutable and already exists for this session")
 
-    args = argparse.Namespace(
-        repo=repo,
-        run_id=run_id,
-        owner=owner or session_id,
-        owned_path=list(owned_paths),
-        adoption_manifest=None,
-        output=str(open_receipt),
-    )
-    receipt, exit_code = gate.open_gate(args)
-    repo_root = gate.repo_root(repo)
-    gate.immutable_write_json(str(open_receipt), receipt, repo_root)
-    if exit_code or not receipt.get("ok"):
-        return {
-            "ok": False,
-            "gate": "Blocked",
-            "state": "OPEN_REJECTED",
-            "open_receipt": str(open_receipt),
-            "violations": receipt.get("violations", []),
-        }
+    with _lease_lock(_worktree_lock_path(root, repo_root)):
+        active = _active_worktree_leases(root, repo_root)
+        if active:
+            existing = active[0]
+            violations = [
+                "one active lease per worktree is required; "
+                f"extend or checkpoint existing lease {existing.get('session_id')}/{existing.get('run_id')}"
+            ]
+            rejection = {
+                "schema": "loaw.worktree_reconciliation_open_rejection.v1",
+                "generated_at": utc_now(),
+                "ok": False,
+                "gate": "Blocked",
+                "state": "OPEN_REJECTED",
+                "session_id": session_id,
+                "run_id": run_id,
+                "worktree": str(repo_root),
+                "conflicting_lease": {
+                    "session_id": existing.get("session_id"),
+                    "run_id": existing.get("run_id"),
+                    "lease_path": existing.get("lease_path"),
+                    "lease_deadline": existing.get("lease_deadline"),
+                },
+                "violations": violations,
+            }
+            _atomic_json(open_receipt, rejection, immutable=True)
+            return {
+                "ok": False,
+                "gate": "Blocked",
+                "state": "OPEN_REJECTED",
+                "open_receipt": str(open_receipt),
+                "violations": violations,
+            }
 
-    now = utc_now()
-    lease = {
-        "schema": LEASE_SCHEMA,
-        "lease_id": hashlib.sha256(f"{session_id}\0{run_id}\0{receipt['identity']['worktree']}".encode()).hexdigest(),
-        "session_id": session_id,
-        "run_id": run_id,
-        "owner": owner or session_id,
-        "authority_policy": AUTHORITY_POLICY,
-        "state": "ACTIVE",
-        "complete": False,
-        "created_at": now,
-        "updated_at": now,
-        "lease_deadline": _lease_deadline(),
-        "worktree": receipt["identity"]["worktree"],
-        "branch": receipt["identity"]["branch"],
-        "starting_head": receipt["identity"]["head"],
-        "starting_status_sha256": receipt["starting_status"]["sha256"],
-        "owned_paths": receipt["owned_paths"],
-        "open_receipt": str(open_receipt),
-        "run_directory": str(run_dir),
-        "last_event": str(open_receipt),
-        "checkpoint_commit": None,
-        "blocker": None,
-    }
-    _atomic_json(lease_path, lease, immutable=True)
-    return {"ok": True, "gate": "Pass", "state": "ACTIVE", "lease": str(lease_path), "open_receipt": str(open_receipt)}
+        args = argparse.Namespace(
+            repo=repo,
+            run_id=run_id,
+            owner=owner or session_id,
+            owned_path=list(owned_paths),
+            adoption_manifest=str(Path(adoption_manifest).expanduser().resolve()) if adoption_manifest else None,
+            output=str(open_receipt),
+        )
+        receipt, exit_code = gate.open_gate(args)
+        gate.immutable_write_json(str(open_receipt), receipt, repo_root)
+        if exit_code or not receipt.get("ok"):
+            return {
+                "ok": False,
+                "gate": "Blocked",
+                "state": "OPEN_REJECTED",
+                "open_receipt": str(open_receipt),
+                "violations": receipt.get("violations", []),
+            }
+
+        now = utc_now()
+        lease = {
+            "schema": LEASE_SCHEMA,
+            "lease_id": hashlib.sha256(f"{session_id}\0{run_id}\0{receipt['identity']['worktree']}".encode()).hexdigest(),
+            "session_id": session_id,
+            "run_id": run_id,
+            "owner": owner or session_id,
+            "authority_policy": AUTHORITY_POLICY,
+            "state": "ACTIVE",
+            "complete": False,
+            "created_at": now,
+            "updated_at": now,
+            "lease_deadline": _lease_deadline(),
+            "worktree": receipt["identity"]["worktree"],
+            "branch": receipt["identity"]["branch"],
+            "starting_head": receipt["identity"]["head"],
+            "starting_status_sha256": receipt["starting_status"]["sha256"],
+            "owned_paths": receipt["owned_paths"],
+            "open_receipt": str(open_receipt),
+            "run_directory": str(run_dir),
+            "last_event": str(open_receipt),
+            "checkpoint_commit": None,
+            "checkpoint_ref": None,
+            "blocker": None,
+        }
+        _atomic_json(lease_path, lease, immutable=True)
+        return {
+            "ok": True,
+            "gate": "Pass",
+            "state": "ACTIVE",
+            "lease": str(lease_path),
+            "open_receipt": str(open_receipt),
+        }
 
 
 def load_lease(
@@ -428,6 +531,96 @@ def extend_lease(
         return {"ok": True, "gate": "Pass", "state": "ACTIVE", "owned_paths": scopes, "event": str(event_path)}
 
 
+def supersede_lease(
+    *,
+    session_id: str,
+    run_id: str,
+    superseded_by: str,
+    reason: str,
+    state_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Resolve a stale blocked lease without erasing its immutable failure receipt.
+
+    Recovery is intentionally narrow: the named later lease must own the same
+    worktree, be durably checkpointed/closed, and bind the current clean HEAD.
+    """
+    gate = _gate()
+    path, _ = load_lease(session_id, run_id, state_root=state_root)
+    _, successor = load_lease(session_id, superseded_by, state_root=state_root)
+    if run_id == superseded_by:
+        raise ReconciliationError("a lease cannot supersede itself")
+    with _lease_lock(path):
+        lease = _load_json(path)
+        violations: list[str] = []
+        if lease.get("state") != "BLOCKED_DIRTY":
+            violations.append(f"only BLOCKED_DIRTY leases can be superseded; state={lease.get('state')}")
+        if successor.get("state") not in {"CHECKPOINTED_WIP", "NO_CHANGE", "ALREADY_CLEAN", "COMMITTED_CLEAN"}:
+            violations.append(f"superseding lease is not durable; state={successor.get('state')}")
+        if lease.get("worktree") != successor.get("worktree"):
+            violations.append("superseding lease owns a different worktree")
+        repo = gate.repo_root(lease["worktree"])
+        identity = gate.identity(repo)
+        snapshot = gate.status_snapshot(repo)
+        successor_head = successor.get("ending_head") or successor.get("checkpoint_commit")
+        if snapshot["dirty_path_count"]:
+            violations.append("supersession requires a clean worktree")
+        if identity.get("head") != successor_head:
+            violations.append("superseding lease does not bind the current HEAD")
+        if identity.get("branch") != successor.get("branch"):
+            violations.append("superseding lease branch does not match the live worktree")
+
+        event = {
+            "schema": SUPERSEDE_SCHEMA,
+            "generated_at": utc_now(),
+            "session_id": session_id,
+            "run_id": run_id,
+            "superseded_by": superseded_by,
+            "reason": _display_token(reason, 120),
+            "worktree": str(repo),
+            "branch": identity.get("branch"),
+            "head": identity.get("head"),
+            "status_sha256": snapshot["sha256"],
+            "previous_state": lease.get("state"),
+            "previous_blocker": lease.get("blocker"),
+            "previous_event": lease.get("last_event"),
+            "successor_state": successor.get("state"),
+            "successor_event": successor.get("last_event"),
+            "violations": violations,
+            "ok": not violations,
+            "gate": "Pass" if not violations else "Blocked",
+            "complete": False,
+            "state": "SUPERSEDED_CLEAN" if not violations else lease.get("state"),
+        }
+        event_path = _event_path(Path(lease["run_directory"]), "lease-supersession")
+        _atomic_json(event_path, event, immutable=True)
+        if violations:
+            return {
+                "ok": False,
+                "gate": "Blocked",
+                "state": lease.get("state"),
+                "complete": False,
+                "receipt": str(event_path),
+                "violations": violations,
+            }
+        lease.update({
+            "state": "SUPERSEDED_CLEAN",
+            "complete": False,
+            "blocker": None,
+            "superseded_by": superseded_by,
+            "superseded_at": utc_now(),
+            "ending_head": identity.get("head"),
+            "last_event": str(event_path),
+        })
+        _atomic_json(path, lease, immutable=False)
+        return {
+            "ok": True,
+            "gate": "Pass",
+            "state": "SUPERSEDED_CLEAN",
+            "complete": False,
+            "receipt": str(event_path),
+        }
+
+
 def _sensitive_path_violations(repo: Path, paths: Iterable[str]) -> list[str]:
     violations: list[str] = []
     for relative in paths:
@@ -516,8 +709,10 @@ def checkpoint_lease(
     gitleaks_path: str | None = None,
 ) -> dict[str, Any]:
     gate = _gate()
+    root = _state_root(state_root)
     lease_path, _ = load_lease(session_id, run_id, state_root=state_root)
-    with _lease_lock(lease_path):
+    with contextlib.ExitStack() as locks:
+        locks.enter_context(_lease_lock(lease_path))
         lease = _load_json(lease_path)
         if lease.get("state") != "ACTIVE":
             return {
@@ -531,6 +726,7 @@ def checkpoint_lease(
             raise ReconciliationError("session does not own this lease")
 
         repo = gate.repo_root(lease["worktree"])
+        locks.enter_context(_lease_lock(_worktree_lock_path(root, repo)))
         opened = _load_json(Path(lease["open_receipt"]))
         effective_open = dict(opened)
         effective_open["owned_paths"] = lease.get("owned_paths") or []
@@ -539,12 +735,28 @@ def checkpoint_lease(
         classifications = gate.classify_paths(effective_open, snapshot)
         peer_scan = gate.scan_peer_worktrees(repo, effective_open["owned_paths"])
         violations = gate.verify_identity(opened, live_identity)
+        active_worktree_leases = _checkpoint_blocking_worktree_leases(root, repo)
+        if len(active_worktree_leases) != 1:
+            identities = [
+                f"{item.get('session_id')}/{item.get('run_id')}"
+                for item in active_worktree_leases
+            ]
+            violations.append(
+                "multiple active leases for one worktree block automatic checkpoint: "
+                + ", ".join(identities)
+            )
         if live_identity.get("branch") in gate.CANONICAL_BRANCHES or not live_identity.get("branch"):
             violations.append("automatic checkpoint requires a non-canonical attached task branch")
         if classifications["foreign_unknown"]:
             violations.append("dirty paths escape the lease ownership scope")
         if not peer_scan["ok"]:
             violations.append("dirty peer worktree overlaps the lease ownership scope")
+        deletion_paths = _automatic_deletion_paths(snapshot)
+        if deletion_paths:
+            violations.append(
+                "automatic checkpoint refuses deletions; review and commit them intentionally: "
+                + ", ".join(deletion_paths)
+            )
 
         event: dict[str, Any] = {
             "schema": CHECKPOINT_SCHEMA,
@@ -562,11 +774,15 @@ def checkpoint_lease(
             "classifications": classifications,
             "collision_check": peer_scan,
             "dirty_paths": [row["path"] for row in snapshot["rows"]],
+            "deletion_paths": deletion_paths,
             "untracked_paths": classifications["untracked"],
             "secret_scan": {"tool": "gitleaks", "status": "not_run"},
             "diff_check": "not_run",
             "tests": "not_attested_by_checkpoint_hook",
             "commit": None,
+            "staged_manifest": [],
+            "committed_manifest": [],
+            "checkpoint_ref": None,
             "final_status_sha256": None,
             "violations": violations,
             "complete": False,
@@ -608,10 +824,14 @@ def checkpoint_lease(
             return _finish_failed_checkpoint(lease_path, lease, event, finalize=finalize)
 
         staged = _staged_paths(repo)
+        staged_manifest = _staged_manifest(repo)
+        event["staged_manifest"] = staged_manifest
         post_stage = gate.status_snapshot(repo)
         expected = sorted(set(dirty_paths))
         if staged != expected:
             event["violations"].append("staged path set does not exactly equal the leased dirty path set")
+        if any(item["status"].startswith("D") for item in staged_manifest):
+            event["violations"].append("staged manifest contains a deletion")
         if any(row["worktree_status"] not in {" ", "?"} for row in post_stage["rows"]):
             event["violations"].append("working files changed concurrently after staging")
         if event["violations"]:
@@ -676,12 +896,26 @@ def checkpoint_lease(
 
         ending_identity = gate.identity(repo)
         ending_status = gate.status_snapshot(repo)
+        committed_manifest = _commit_manifest(repo, ending_identity["head"])
         event["commit"] = ending_identity["head"]
+        event["committed_manifest"] = committed_manifest
         event["final_status_sha256"] = ending_status["sha256"]
         event["remaining_dirty_paths"] = [row["path"] for row in ending_status["rows"]]
+        if committed_manifest != event["staged_manifest"]:
+            event["violations"].append("committed change-kind manifest differs from the staged manifest")
         if ending_status["dirty_path_count"]:
             event["violations"].append("worktree remained dirty after checkpoint commit")
+        if event["violations"]:
             return _finish_failed_checkpoint(lease_path, lease, event, finalize=True)
+
+        checkpoint_ref = (
+            f"refs/hermes/checkpoints/{_slug(session_id)}/{_slug(run_id)}/{ending_identity['head']}"
+        )
+        update_ref = _run_git(repo, "update-ref", checkpoint_ref, ending_identity["head"], check=False)
+        if update_ref.returncode:
+            event["violations"].append(f"checkpoint ref creation failed with exit {update_ref.returncode}")
+            return _finish_failed_checkpoint(lease_path, lease, event, finalize=True)
+        event["checkpoint_ref"] = checkpoint_ref
 
         event.update({"ok": True, "gate": "Pass", "state": "CHECKPOINTED_WIP", "complete": False})
         event_path = _write_checkpoint_event(lease, event, "checkpoint")
@@ -692,6 +926,7 @@ def checkpoint_lease(
             "closed_at": utc_now(),
             "ending_head": ending_identity["head"],
             "checkpoint_commit": ending_identity["head"],
+            "checkpoint_ref": checkpoint_ref,
             "last_event": str(event_path),
             "blocker": None,
         })
@@ -702,6 +937,7 @@ def checkpoint_lease(
             "state": "CHECKPOINTED_WIP",
             "complete": False,
             "commit": ending_identity["head"],
+            "checkpoint_ref": checkpoint_ref,
             "receipt": str(event_path),
         }
 

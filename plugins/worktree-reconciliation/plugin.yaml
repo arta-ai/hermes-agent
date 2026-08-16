@@ -1,5 +1,5 @@
 name: worktree-reconciliation
-version: "1.1.0"
+version: "1.1.1"
 description: Session-owned Git worktree leases and exact-path local WIP checkpoint enforcement.
 author: LOAW
 kind: standalone

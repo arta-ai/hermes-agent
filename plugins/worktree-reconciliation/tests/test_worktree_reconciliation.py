@@ -195,6 +195,50 @@ class EngineTests(Fixture):
         ))
         self.assertEqual(git(wt, "rev-parse", "HEAD").stdout.strip(), self.base_head)
 
+    def test_clean_active_successor_breaks_blocked_lease_deadlock(self) -> None:
+        wt = self.worktree("blocked-successor")
+        engine.open_lease(
+            repo=str(wt), session_id="session-recovery", run_id="run-blocked",
+            owned_paths=["src"], state_root=self.state,
+        )
+        blocked_path, blocked = engine.load_lease(
+            "session-recovery", "run-blocked", state_root=self.state,
+        )
+        blocked.update({
+            "state": "BLOCKED_DIRTY",
+            "blocker": "reviewed deletion preserved in exact handoff",
+        })
+        engine._atomic_json(blocked_path, blocked, immutable=False)
+
+        opened = engine.open_lease(
+            repo=str(wt), session_id="session-recovery", run_id="run-successor",
+            owned_paths=["src"], state_root=self.state,
+        )
+        self.assertTrue(opened["ok"])
+
+        superseded = engine.supersede_lease(
+            session_id="session-recovery",
+            run_id="run-blocked",
+            superseded_by="run-successor",
+            reason="exact handoff preserved and worktree restored clean",
+            state_root=self.state,
+        )
+        self.assertTrue(superseded["ok"])
+        self.assertEqual(superseded["state"], "SUPERSEDED_CLEAN")
+
+        closed = engine.checkpoint_lease(
+            session_id="session-recovery", run_id="run-successor",
+            reason="clean recovery successor", finalize=True,
+            state_root=self.state,
+        )
+        self.assertTrue(closed["ok"])
+        self.assertEqual(closed["state"], "NO_CHANGE")
+
+        _, old_lease = engine.load_lease(
+            "session-recovery", "run-blocked", state_root=self.state,
+        )
+        self.assertEqual(old_lease["state"], "SUPERSEDED_CLEAN")
+
     def test_gitleaks_blocks_secret_and_never_commits_it(self) -> None:
         wt = self.worktree("secret")
         engine.open_lease(

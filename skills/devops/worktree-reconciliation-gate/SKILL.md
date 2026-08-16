@@ -86,9 +86,12 @@ hermes worktree-gate checkpoint \
   --reason <boundary> \
   --finalize
 
-# Resolve an old BLOCKED_DIRTY lease only through a named durable clean
-# successor for the same worktree and live HEAD. The immutable blocker receipt
-# remains preserved; the old lease becomes SUPERSEDED_CLEAN.
+# Resolve an old BLOCKED_DIRTY lease through a named clean successor for the
+# same worktree and live HEAD. A newly opened ACTIVE successor is eligible only
+# while the worktree remains clean at its exact opening HEAD and the lease is
+# unexpired; this lets supersession break the legacy duplicate-lease deadlock.
+# The immutable blocker receipt remains preserved; the old lease becomes
+# SUPERSEDED_CLEAN, after which the successor can close NO_CHANGE.
 hermes worktree-gate supersede \
   --session-id <exact-hermes-session-id> \
   --run-id <old-blocked-run-id> \

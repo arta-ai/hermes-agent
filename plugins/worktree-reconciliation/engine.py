@@ -591,7 +591,10 @@ def supersede_lease(
     """Resolve a stale blocked lease without erasing its immutable failure receipt.
 
     Recovery is intentionally narrow: the named later lease must own the same
-    worktree, be durably checkpointed/closed, and bind the current clean HEAD.
+    worktree and bind the current clean HEAD. A still-active successor is
+    admitted only at its unchanged opening HEAD and before lease expiry; this
+    breaks the otherwise circular dependency where the blocked predecessor
+    prevents the clean successor from reaching a durable checkpoint state.
     """
     gate = _gate()
     path, _ = load_lease(session_id, run_id, state_root=state_root)
@@ -603,14 +606,21 @@ def supersede_lease(
         violations: list[str] = []
         if lease.get("state") != "BLOCKED_DIRTY":
             violations.append(f"only BLOCKED_DIRTY leases can be superseded; state={lease.get('state')}")
-        if successor.get("state") not in {"CHECKPOINTED_WIP", "NO_CHANGE", "ALREADY_CLEAN", "COMMITTED_CLEAN"}:
+        successor_state = successor.get("state")
+        durable_states = {"CHECKPOINTED_WIP", "NO_CHANGE", "ALREADY_CLEAN", "COMMITTED_CLEAN"}
+        active_clean_successor = successor_state == "ACTIVE"
+        if successor_state not in durable_states and not active_clean_successor:
             violations.append(f"superseding lease is not durable; state={successor.get('state')}")
+        if active_clean_successor and _is_expired(successor):
+            violations.append("active superseding lease is expired")
         if lease.get("worktree") != successor.get("worktree"):
             violations.append("superseding lease owns a different worktree")
         repo = gate.repo_root(lease["worktree"])
         identity = gate.identity(repo)
         snapshot = gate.status_snapshot(repo)
         successor_head = successor.get("ending_head") or successor.get("checkpoint_commit")
+        if active_clean_successor:
+            successor_head = successor.get("starting_head")
         if snapshot["dirty_path_count"]:
             violations.append("supersession requires a clean worktree")
         if identity.get("head") != successor_head:

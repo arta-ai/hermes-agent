@@ -16,17 +16,25 @@ metadata:
 
 Coding may temporarily dirty an isolated worktree. The prohibited state is **unowned, uncheckpointed, or ambiguously abandoned dirt**.
 
-This skill extends the non-destructive canonical hygiene rule. Arta granted standing authority on 2026-08-13 for **automatic local WIP checkpoint commits only** under all of these conditions:
+This skill extends the non-destructive canonical hygiene rule. The automatic interruption/checkpoint mechanism has standing authority to create a local WIP commit when all of these conditions hold:
 
 - isolated, attached, non-canonical task branch;
+- exactly one active lease for the worktree across all Hermes sessions;
 - exact paths claimed by a session-owned lease before mutation;
 - fresh peer-worktree collision check;
 - no unknown, peer-owned, client, matter, credential, secret, or blocked binary/document material;
 - real `gitleaks --staged` and `git diff --cached --check` pass;
-- local commit only, explicitly marked `Complete: false`;
-- no push, merge, tag, deploy, release, promotion, reset, clean, stash, or checkout authority.
+- local checkpoint explicitly marked `Complete: false`.
 
-Outside that boundary the mechanism remains fail-closed and non-destructive.
+Automatic checkpoints preserve modifications and additions only. A tracked
+deletion fails closed and must be reviewed and committed intentionally under
+the current task authority. Every successful automatic checkpoint also gets
+an immutable `refs/hermes/checkpoints/.../<commit>` ref. The WIP commit and ref
+are preservation evidence, not semantic adoption or package authority.
+An expired lease is retired automatically only when the exact worktree is
+clean; any expired dirty lease remains fail-closed for explicit recovery.
+
+That automatic checkpoint scope does not limit current-request authority. When the current scoped request includes saving, committing, pushing, merging, tagging, deploying, releasing, promoting, or other named effects, execute them after the relevant target/collision readback rather than adding a redundant blanket prohibition. Unknown and peer-owned work remains preserved.
 
 ## Installed gate CLI
 
@@ -77,6 +85,15 @@ hermes worktree-gate checkpoint \
   --run-id <unique-run-id> \
   --reason <boundary> \
   --finalize
+
+# Resolve an old BLOCKED_DIRTY lease only through a named durable clean
+# successor for the same worktree and live HEAD. The immutable blocker receipt
+# remains preserved; the old lease becomes SUPERSEDED_CLEAN.
+hermes worktree-gate supersede \
+  --session-id <exact-hermes-session-id> \
+  --run-id <old-blocked-run-id> \
+  --superseded-by <later-clean-run-id> \
+  --reason <bounded-recovery-reason>
 
 hermes worktree-gate status --session-id <exact-hermes-session-id>
 ```
@@ -136,8 +153,11 @@ python3 scripts/worktree_hygiene_guard.py preflight \
 Authorized default checkpoint in this installation:
 
 - local WIP commit on the isolated task branch;
-- explicitly stage only the live leased dirty paths (`git add -A -- <exact paths>`), including intended deletions and untracked files but never a broad repository add;
+- explicitly stage only the live leased dirty paths (`git add -A -- <exact paths>`), including modifications and untracked additions but never a broad repository add;
+- refuse every tracked deletion in the automatic path; intentional removals require an explicit reviewed commit;
 - reject prohibited filename/file classes and escaping symlinks, then run real `gitleaks --staged` before committing;
+- require the staged change-kind manifest to equal the committed change-kind manifest exactly;
+- create an immutable `refs/hermes/checkpoints/.../<commit>` preservation ref;
 - never push, merge, tag, or promote the WIP commit automatically;
 - use the fixed local checkpoint identity `Hermes Worktree Gate <checkpoint@local.invalid>`;
 - record tests as un-attested unless a separate test receipt proves them;
@@ -213,6 +233,7 @@ This is the mandatory emergency disposition when interruption occurs and no auth
 The enabled `worktree-reconciliation` plugin currently registers:
 
 - `pre_tool_call`: block repository writes without a valid open receipt/lease; block paths outside the claim.
+- lease open: enforce one active lease per worktree under a worktree-scoped lock; later scopes extend that lease instead of opening siblings; retire expired leases only after a clean-status readback.
 - `pre_llm_call`: inject only active/blocked lease metadata for the owning session.
 - `pre_verify`: create the exact-path local WIP checkpoint on a normal coding boundary, or keep the turn running on a fail-closed blocker.
 - `on_session_end`: independently checkpoint on success, error, iteration limit, or interruption; unresolved failures close `BLOCKED_DIRTY`.

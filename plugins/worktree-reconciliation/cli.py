@@ -16,6 +16,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     open_parser.add_argument("--run-id", required=True)
     open_parser.add_argument("--owner", default="")
     open_parser.add_argument("--owned-path", action="append", required=True)
+    open_parser.add_argument("--adoption-manifest", default="")
     open_parser.add_argument("--state-root", default="")
 
     extend_parser = commands.add_parser("extend", help="Extend an active lease after a fresh collision check")
@@ -30,6 +31,13 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     checkpoint_parser.add_argument("--reason", default="manual")
     checkpoint_parser.add_argument("--finalize", action="store_true")
     checkpoint_parser.add_argument("--state-root", default="")
+
+    supersede_parser = commands.add_parser("supersede", help="Resolve a stale blocked lease through a durable clean successor")
+    supersede_parser.add_argument("--session-id", required=True)
+    supersede_parser.add_argument("--run-id", required=True)
+    supersede_parser.add_argument("--superseded-by", required=True)
+    supersede_parser.add_argument("--reason", default="durable clean successor")
+    supersede_parser.add_argument("--state-root", default="")
 
     status_parser = commands.add_parser("status", help="Read lease/checkpoint state")
     status_parser.add_argument("--session-id", default="")
@@ -49,6 +57,7 @@ def worktree_gate_command(args: argparse.Namespace) -> int:
                 run_id=args.run_id,
                 owner=args.owner or args.session_id,
                 owned_paths=args.owned_path,
+                adoption_manifest=args.adoption_manifest or None,
                 state_root=state_root,
             )
         elif action == "extend":
@@ -64,6 +73,14 @@ def worktree_gate_command(args: argparse.Namespace) -> int:
                 run_id=args.run_id,
                 reason=args.reason,
                 finalize=bool(args.finalize),
+                state_root=state_root,
+            )
+        elif action == "supersede":
+            result = engine.supersede_lease(
+                session_id=args.session_id,
+                run_id=args.run_id,
+                superseded_by=args.superseded_by,
+                reason=args.reason,
                 state_root=state_root,
             )
         elif action == "status":
